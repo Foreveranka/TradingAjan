@@ -1,0 +1,6 @@
+node_modules/
+.env
+cuzdan.json
+nobetci-durum.json
+*.log
+.DS_Store

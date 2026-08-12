@@ -1,0 +1,21 @@
+{
+  "name": "tradingajan",
+  "version": "1.0.0",
+  "description": "Autonomous agent trading prediction markets on Gensyn Delphi. Prices the questions that have a published answer, ignores the ones that do not.",
+  "main": "index.js",
+  "scripts": {
+    "bak": "node bak.mjs",
+    "teklif": "node teklif.mjs",
+    "tur": "node anka.mjs",
+    "al": "node anka.mjs --al",
+    "nobet": "node nobetci.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@gensyn-ai/gensyn-delphi-sdk": "^2.1.0",
+    "dotenv": "^17.4.2"
+  },
+  "type": "module"
+}

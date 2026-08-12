@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Anka">
+  <title>Anka</title>
+
+  <!--
+    A phoenix rising, wings raised, above a line that climbs.
+
+    Two earlier attempts and what they taught. The first made the wing double
+    as the chart: one shape doing two jobs sounded clever and rendered as a
+    shrimp. The second separated them but left a plain round head with a beak
+    pointing at the sky, which reads as a chick in a party hat, and pushed the
+    steps behind the wings where they broke into disconnected fragments.
+
+    So: the head is in profile, because a profile is what makes a bird a bird
+    and a circle is what makes it a duck. The wings carry feather notches so
+    they are wings rather than moth petals. The steps sit low and unbroken,
+    the ground the thing rises from, never crossing the body.
+
+    Built to survive 32px. The silhouette carries the mark; the eye, the beak
+    and the steps can all vanish without it stopping being a bird.
+
+    Gradients use userSpaceOnUse. In objectBoundingBox units a gradient
+    collapses on any shape with zero width or height, so a straight stroke
+    renders as nothing at all.
+  -->
+
+  <defs>
+    <linearGradient id="ember" gradientUnits="userSpaceOnUse" x1="256" y1="450" x2="256" y2="100">
+      <stop offset="0" stop-color="#A81D24"/>
+      <stop offset="0.5" stop-color="#F2711C"/>
+      <stop offset="1" stop-color="#FFD24A"/>
+    </linearGradient>
+    <linearGradient id="wingL" gradientUnits="userSpaceOnUse" x1="70" y1="250" x2="250" y2="130">
+      <stop offset="0" stop-color="#7E161D"/>
+      <stop offset="1" stop-color="#F2711C"/>
+    </linearGradient>
+    <linearGradient id="wingR" gradientUnits="userSpaceOnUse" x1="442" y1="250" x2="262" y2="130">
+      <stop offset="0" stop-color="#7E161D"/>
+      <stop offset="1" stop-color="#F2711C"/>
+    </linearGradient>
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="256" cy="300" r="250">
+      <stop offset="0" stop-color="#3A1206"/>
+      <stop offset="1" stop-color="#0B0B10"/>
+    </radialGradient>
+  </defs>
+
+  <circle cx="256" cy="256" r="248" fill="url(#glow)"/>
+  <circle cx="256" cy="256" r="238" fill="none" stroke="#F2711C" stroke-opacity="0.3" stroke-width="3"/>
+
+  <!-- The ground: a market climbing, left to right, well clear of the bird. -->
+  <path d="M92 440 L150 440 L150 418 L208 418 L208 396 L266 396 L266 370 L324 370 L324 340 L420 340"
+        fill="none" stroke="#F2711C" stroke-opacity="0.4"
+        stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Wings, raised and notched so they read as feathers. -->
+  <path d="M240 226
+           C210 186 166 148 96 126
+           C104 156 114 180 130 202
+           C112 196 100 192 86 190
+           C104 220 124 244 148 262
+           C132 262 120 260 108 256
+           C136 292 182 314 242 322 Z"
+        fill="url(#wingL)"/>
+  <path d="M272 226
+           C302 186 346 148 416 126
+           C408 156 398 180 382 202
+           C400 196 412 192 426 190
+           C408 220 388 244 364 262
+           C380 262 392 260 404 256
+           C376 292 330 314 270 322 Z"
+        fill="url(#wingR)"/>
+
+  <!-- Body, tapering to the tail. -->
+  <path d="M256 186
+           C280 214 288 258 284 300
+           C280 338 270 362 256 384
+           C242 362 232 338 228 300
+           C224 258 232 214 256 186 Z"
+        fill="url(#ember)"/>
+
+  <!-- Head in profile, beak forward, crest swept back. -->
+  <path d="M238 176
+           C230 150 240 126 262 118
+           C284 110 306 122 312 142
+           L352 152 L310 172
+           C304 186 288 194 268 192
+           C254 191 242 186 238 176 Z"
+        fill="url(#ember)"/>
+  <g fill="url(#ember)" opacity="0.95">
+    <path d="M252 120 C240 100 224 86 202 78 C216 96 224 112 230 130 Z"/>
+    <path d="M266 116 C260 94 250 76 232 62 C240 84 244 102 246 122 Z"/>
+  </g>
+  <circle cx="288" cy="146" r="8" fill="#0B0B10"/>
+
+  <!-- Tail. -->
+  <g fill="url(#ember)" opacity="0.88">
+    <path d="M256 376 C244 404 232 424 210 442 C220 412 226 392 230 372 Z"/>
+    <path d="M256 376 C268 404 280 424 302 442 C292 412 286 392 282 372 Z"/>
+    <path d="M256 380 C258 410 258 432 256 454 C254 432 254 410 256 380 Z"/>
+  </g>
+</svg>
