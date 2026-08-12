@@ -118,7 +118,7 @@ function buzTahmini(rows, tarih, esik, altinda) {
   if (!son) return null;
   const gercek = rows.find((r) => r.tarih === tarih);
   if (gercek) {
-    return { p: (gercek.deger < esik) === altinda ? 0.97 : 0.03, not: `yayinlandi ${gercek.deger}` };
+    return { p: (gercek.deger < esik) === altinda ? 0.97 : 0.03, not: `NSIDC yayınladı: ${gercek.deger}, eşik ${esik}` };
   }
   const { ort, sap } = degisim(rows);
   const adim = Math.max(gunFarki(tarih, son.tarih), 0);
@@ -127,7 +127,7 @@ function buzTahmini(rows, tarih, esik, altinda) {
   const pAlt = phi((esik - beklenen) / belirsizlik);
   return {
     p: Math.min(0.97, Math.max(0.03, altinda ? pAlt : 1 - pAlt)),
-    not: `son ${son.tarih}=${son.deger}, ${tarih} icin ~${beklenen.toFixed(3)}, esik ${esik}`,
+    not: `NSIDC son ölçüm ${son.tarih}: ${son.deger}. ${tarih} için beklenen ~${beklenen.toFixed(3)}, eşik ${esik}`,
   };
 }
 
@@ -138,7 +138,7 @@ function lekeTahmini(rows, tarih, esik) {
     return {
       p: gercek.deger >= esik ? Math.min(0.97, 0.7 + 0.27 * Math.min(oran - 1, 1))
                               : Math.max(0.03, 0.3 - 0.27 * Math.min(1 - oran, 1)),
-      not: `yayinlandi ${gercek.deger}, esik ${esik}`,
+      not: `SILSO yayınladı: ${gercek.deger}, eşik ${esik}`,
     };
   }
   const son7 = rows.slice(0, 7).map((r) => r.deger);
@@ -146,7 +146,7 @@ function lekeTahmini(rows, tarih, esik) {
   const sap = Math.sqrt(son7.reduce((a, b) => a + (b - ort) ** 2, 0) / son7.length) || 15;
   return {
     p: Math.min(0.9, Math.max(0.1, phi((ort - esik) / Math.max(sap, 5)))),
-    not: `henuz yok, 7 gun ort ${ort.toFixed(0)}+-${sap.toFixed(0)}`,
+    not: `SILSO henüz yayınlamadı. Son 7 gün ortalaması ${ort.toFixed(0)}, sapma ${sap.toFixed(0)}`,
   };
 }
 
@@ -181,7 +181,12 @@ async function tur() {
       if (!k) {
         const fiyat = (m.metadata?.outcomes ?? [])
           .map((o, i) => `${o} ${(m.spotImpliedProbabilities?.[i] * 100).toFixed(0)}%`).join('  ');
-        await haber(`YENI PIYASA (elle bakilmali)\n${soru}\n${fiyat}\nuzlasma ${(m.settlesAt ?? '').slice(0, 16)}`);
+        await haber(
+          `🆕 YENİ PİYASA\n\n${soru}\n\n`
+          + `Fiyatlar: ${fiyat}\n`
+          + `Uzlaşma: ${(m.settlesAt ?? '').slice(0, 16).replace('T', ' ')}\n\n`
+          + `Bunu ajan fiyatlayamıyor, elle bakılmalı.`,
+        );
       }
     }
 
@@ -221,12 +226,18 @@ async function tur() {
       nakit -= maliyet;
       durum.islenen.push(m.id);
       await haber(
-        `ISLEM ACILDI\n${soru}\n${yon} x${hisse} = ${maliyet.toFixed(0)} TST (ort ${(maliyet / hisse * 100).toFixed(0)}%)\n`
-        + `tahmin ${(tahmin.p * 100).toFixed(0)}% piyasa ${(piyasa * 100).toFixed(0)}% fark ${(fark * 100).toFixed(0)} puan\n`
-        + `veri: ${tahmin.not}\nkalan nakit ${nakit.toFixed(0)} TST`,
+        `✅ İŞLEM AÇILDI\n\n${soru}\n\n`
+        + `Alınan: ${yon}, ${hisse} hisse\n`
+        + `Maliyet: ${maliyet.toFixed(0)} TST (ortalama %${(maliyet / hisse * 100).toFixed(0)})\n`
+        + `Kazanırsa: +${(hisse - maliyet).toFixed(0)} TST\n\n`
+        + `Benim tahminim: %${(tahmin.p * 100).toFixed(0)}\n`
+        + `Piyasanın fiyatı: %${(piyasa * 100).toFixed(0)}\n`
+        + `Aradaki fark: ${Math.abs(fark * 100).toFixed(0)} puan\n\n`
+        + `Dayandığım veri: ${tahmin.not}\n\n`
+        + `Kalan nakit: ${nakit.toFixed(0)} TST`,
       );
     } catch (e) {
-      await haber(`ISLEM ACILAMADI\n${soru}\n${e.message.slice(0, 120)}`);
+      await haber(`⚠️ İŞLEM AÇILAMADI\n\n${soru}\n\nSebep: ${e.message.slice(0, 140)}`);
     }
   }
 
@@ -236,7 +247,12 @@ async function tur() {
     const me = (await client.getSigner()).address;
     const pos = await client.listPositions({ wallet: me }).catch(() => ({ positions: [] }));
     const acik = (pos.positions ?? []).filter((p) => p.marketStatus === 'open').length;
-    await haber(`ANKA DURUM\nnakit ${nakit.toFixed(0)} TST, acik pozisyon ${acik}, izlenen piyasa ${markets.length}`);
+    await haber(
+      `📊 GÜNLÜK DURUM\n\n`
+      + `Nakit: ${nakit.toFixed(0)} TST\n`
+      + `Açık pozisyon: ${acik}\n`
+      + `İzlenen piyasa: ${markets.length}`,
+    );
   }
 
   durumYaz(durum);
@@ -244,7 +260,7 @@ async function tur() {
 
 // ------------------------------------------------------------------ dongu
 
-await haber('ANKA nobete basladi');
+await haber('🔭 Anka nöbete başladı. Beş dakikada bir bakacak, bir şey olunca yazacak.');
 for (;;) {
   try { await tur(); }
   catch (e) { console.log(new Date().toISOString(), 'tur hatasi:', e.message.slice(0, 140)); }
