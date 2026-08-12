@@ -23,6 +23,8 @@ import { DelphiClient } from '@gensyn-ai/gensyn-delphi-sdk';
 
 const DURUM = new URL('./nobetci-durum.json', import.meta.url).pathname;
 const ARALIK_MS = 5 * 60_000;
+/// Commands run on their own clock, because somebody is waiting on the reply.
+const KOMUT_ARALIK_MS = 10_000;
 
 /// Never risk more than this on one question, whatever the edge looks like.
 const TEK_ISLEM_TAVAN = 500;
@@ -41,30 +43,91 @@ const toTst = (raw) => Number(raw) / 10 ** DEC;
 
 // ------------------------------------------------------------------ telegram
 
+/** HTML is the message format, so anything interpolated has to be escaped. */
+const kacir = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * A question wrapped so Telegram makes it tap to copy.
+ *
+ * The wording is what settles the market, so it is the one thing worth having
+ * on the clipboard: paste it into a search and the answer is usually one
+ * result away.
+ */
+const kopyalanabilir = (t) => `<code>${kacir(t)}</code>`;
+
 async function haber(metin) {
   const token = process.env.ALERT_TELEGRAM_TOKEN;
   const chat = process.env.ALERT_TELEGRAM_CHAT;
-  console.log(metin);
+  console.log(metin.replace(/<\/?code>/g, ''));
   if (!token || !chat) return;
   try {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: chat, text: metin, disable_web_page_preview: true }),
+      body: JSON.stringify({
+        chat_id: chat, text: metin, parse_mode: 'HTML', disable_web_page_preview: true,
+      }),
     });
   } catch (e) {
     console.log('telegram gonderilemedi:', e.message.slice(0, 60));
   }
 }
 
+/**
+ * Reads replies, so a market the agent cannot price can still be traded by
+ * whoever can. The alert carries a short code and the answer comes back as one
+ * line from a phone.
+ *
+ * Only the configured chat is obeyed. This process holds the key, so a bot
+ * token that leaks must not become a way to spend the balance: the token lets
+ * somebody send messages, and the chat check is what stops those messages
+ * being orders.
+ */
+async function komutlariOku() {
+  const token = process.env.ALERT_TELEGRAM_TOKEN;
+  const chat = String(process.env.ALERT_TELEGRAM_CHAT ?? '');
+  if (!token || !chat) return [];
+  const durum = durumOku();
+  const offset = durum.sonGuncelleme ? durum.sonGuncelleme + 1 : undefined;
+  let r;
+  try {
+    const url = new URL(`https://api.telegram.org/bot${token}/getUpdates`);
+    url.searchParams.set('timeout', '0');
+    if (offset) url.searchParams.set('offset', String(offset));
+    r = await (await fetch(url)).json();
+  } catch { return []; }
+  if (!r?.ok) return [];
+
+  const komutlar = [];
+  let son = durum.sonGuncelleme ?? 0;
+  for (const u of r.result) {
+    son = Math.max(son, u.update_id);
+    const msg = u.message ?? u.channel_post;
+    if (!msg?.text) continue;
+    if (String(msg.chat?.id) !== chat) continue; // baskasinin emri emir degil
+    komutlar.push(msg.text.trim());
+  }
+  if (son !== (durum.sonGuncelleme ?? 0)) {
+    const d = durumOku(); d.sonGuncelleme = son; durumYaz(d);
+  }
+  return komutlar;
+}
+
+/** A market's short code: enough to name it in a message, short enough to type. */
+const kod = (id) => id.slice(2, 6).toLowerCase();
+
 // --------------------------------------------------------------------- durum
 
-const bosDurum = { gorulen: [], islenen: [], sonOzet: 0 };
+const bosDurum = { gorulen: [], islenen: [], sonOzet: 0, sonGuncelleme: 0 };
 const durumOku = () => {
   try { return { ...bosDurum, ...JSON.parse(readFileSync(DURUM, 'utf8')) }; }
   catch { return { ...bosDurum }; }
 };
-const durumYaz = (d) => { try { writeFileSync(DURUM, JSON.stringify(d, null, 2)); } catch {} };
+/** Merges rather than overwrites: the command loop and the market loop both
+ *  write, and a whole-object write from one silently undoes the other. */
+const durumYaz = (yama) => {
+  try { writeFileSync(DURUM, JSON.stringify({ ...durumOku(), ...yama }, null, 2)); } catch {}
+};
 
 // ---------------------------------------------------------------------- veri
 
@@ -158,6 +221,144 @@ function tani(soru) {
   return null;
 }
 
+/**
+ * Runs one order that came in from the phone.
+ *
+ * Deliberately narrow. It buys a named outcome in a named market for a named
+ * number of tokens, and refuses anything it cannot read exactly: a market it
+ * cannot find, an outcome that is not on the ticket, an amount above the cap.
+ * A trading command parsed loosely is a trading command that eventually buys
+ * the wrong side of something.
+ */
+async function komutIsle(metin, markets, nakit) {
+  // `/liste`, `Liste` and `liste` are the same intent typed three ways.
+  const p = metin.trim().toLowerCase().replace(/^\//, '').split(/\s+/);
+
+  if (p[0] === 'durum') {
+    const me = (await client.getSigner()).address;
+    const pos = await client.listPositions({ wallet: me }).catch(() => ({ positions: [] }));
+    const acik = (pos.positions ?? []).filter((x) => x.marketStatus === 'open');
+    await haber(`📊 DURUM\n\nNakit: ${nakit.toFixed(0)} TST\nAçık pozisyon: ${acik.length}`);
+    return true;
+  }
+
+  if (p[0] === 'poz' || p[0] === 'pozisyon') {
+    const me = (await client.getSigner()).address;
+    const pos = await client.listPositions({ wallet: me }).catch(() => ({ positions: [] }));
+    const hepsi = (pos.positions ?? []).filter((x) => !x.redeemedOrLiquidated);
+    if (!hepsi.length) { await haber('Açık pozisyon yok.'); return true; }
+
+    // Each position names a market but not its question, and a settled market
+    // is not in the open list, so each one is fetched on its own.
+    const satirlar = [];
+    const konular = {};
+    let toplamDeger = 0;
+
+    for (const x of hepsi) {
+      let m = null;
+      try { m = await client.getMarket({ id: x.marketProxy, pricesAndImpliedProbabilities: true }); }
+      catch { /* piyasa okunamadi, yine de pozisyonu goster */ }
+
+      const hisse = Number(x.shares) / 1e18;
+      const sonuc = m?.metadata?.outcomes?.[Number(x.outcomeIdx)] ?? `#${x.outcomeIdx}`;
+      const konu = m?.metadata?.category ?? m?.category ?? 'bilinmiyor';
+      const fiyat = m?.spotImpliedProbabilities?.[Number(x.outcomeIdx)];
+
+      // Worth now, not what it cost: a position is only ever worth what it
+      // would fetch, and at settlement a winning share pays exactly one.
+      const deger = fiyat != null ? hisse * fiyat : null;
+      if (deger != null) toplamDeger += deger;
+      konular[konu] = (konular[konu] ?? 0) + (deger ?? 0);
+
+      const durumEtiketi = { open: 'açık', settled: 'uzlaştı', expired: 'süresi doldu' }[x.marketStatus] ?? x.marketStatus;
+      satirlar.push(
+        `<b>${kacir(sonuc)}</b> × ${hisse.toFixed(0)} hisse  (${durumEtiketi})\n`
+        + `Şu anki değeri: ${deger != null ? deger.toFixed(0) + ' TST' : '?'}`
+        + `${fiyat != null ? `  ·  piyasa %${(fiyat * 100).toFixed(0)}` : ''}\n`
+        + `Kazanırsa: ${hisse.toFixed(0)} TST\n`
+        + `${kopyalanabilir((m?.metadata?.question ?? x.marketProxy).slice(0, 110))}`,
+      );
+    }
+
+    const konuSatiri = Object.entries(konular)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k} ${v.toFixed(0)} TST`).join('  ·  ');
+
+    const { balance } = await client.getErc20BalanceWithDecimals();
+    const nakitSimdi = toTst(balance);
+    await haber(
+      `📌 AÇIK POZİSYONLAR (${hepsi.length})\n\n${satirlar.join('\n\n')}\n\n`
+      + `———\nKonulara göre: ${konuSatiri || 'yok'}\n`
+      + `Pozisyonların şu anki değeri: ${toplamDeger.toFixed(0)} TST\n`
+      + `Nakit: ${nakitSimdi.toFixed(0)} TST\n`
+      + `Toplam: ${(toplamDeger + nakitSimdi).toFixed(0)} TST  (başlangıç 1000)`,
+    );
+    return true;
+  }
+
+  if (p[0] === 'liste') {
+    const satirlar = markets.map((m) => {
+      const f = (m.metadata?.outcomes ?? [])
+        .map((o, i) => `${o} %${(m.spotImpliedProbabilities?.[i] * 100).toFixed(0)}`).join(' / ');
+      return `<b>${kod(m.id)}</b>  ${kacir(f)}\n${kopyalanabilir((m.metadata?.question ?? '').slice(0, 110))}`;
+    });
+    await haber(`📋 AÇIK PİYASALAR (${markets.length})\n\n${satirlar.join('\n\n')}`.slice(0, 3900));
+    return true;
+  }
+
+  if (p[0] !== 'al') return false;
+
+  const [, hedefKod, sonucAdi, miktarStr] = p;
+  const miktar = Number(miktarStr);
+  if (!hedefKod || !sonucAdi || !Number.isFinite(miktar) || miktar <= 0) {
+    await haber('Anlamadım. Şöyle yaz:  al <kod> <sonuç> <tst>\nÖrnek:  al a3f yes 100');
+    return true;
+  }
+  if (miktar > TEK_ISLEM_TAVAN) {
+    await haber(`Tek işlemde en fazla ${TEK_ISLEM_TAVAN} TST. İstediğin: ${miktar}.`);
+    return true;
+  }
+  if (miktar > nakit - 5) {
+    await haber(`Nakit yetmiyor. Elde ${nakit.toFixed(0)} TST var, istediğin ${miktar}.`);
+    return true;
+  }
+
+  const m = markets.find((x) => kod(x.id) === hedefKod);
+  if (!m) { await haber(`"${kacir(hedefKod)}" kodlu açık piyasa yok. Listeyi görmek için:  liste`); return true; }
+
+  const outcomes = m.metadata?.outcomes ?? [];
+  const idx = outcomes.findIndex((o) => o.toLowerCase() === sonucAdi
+    || o.toLowerCase().startsWith(sonucAdi));
+  if (idx < 0) {
+    await haber(`Bu piyasada "${kacir(sonucAdi)}" diye bir sonuç yok.\nSeçenekler: ${kacir(outcomes.join(', '))}`);
+    return true;
+  }
+
+  const fiyat = m.spotImpliedProbabilities?.[idx] ?? 0.5;
+  const hisse = Math.floor(miktar / Math.max(fiyat, 0.02));
+  const sharesOut = BigInt(hisse) * SHARE;
+  let tokensIn;
+  try { ({ tokensIn } = await client.quoteBuy({ marketAddress: m.id, outcomeIdx: idx, sharesOut })); }
+  catch (e) { await haber(`Teklif alınamadı: ${kacir(e.message.slice(0, 100))}`); return true; }
+
+  const maliyet = toTst(tokensIn);
+  const maxTokensIn = (tokensIn * BigInt(Math.round(KAYMA * 100))) / 100n;
+  try {
+    await client.ensureTokenApproval({ marketAddress: m.id, minimumAmount: maxTokensIn, approveAmount: maxTokensIn });
+    const { transactionHash } = await client.buyShares({ marketAddress: m.id, outcomeIdx: idx, sharesOut, maxTokensIn });
+    await haber(
+      `✅ SENİN EMRİN GİRİLDİ\n\n${kopyalanabilir(m.metadata?.question)}\n\n`
+      + `Alınan: ${outcomes[idx]}, ${hisse} hisse\n`
+      + `Maliyet: ${maliyet.toFixed(0)} TST (ortalama %${(maliyet / hisse * 100).toFixed(0)})\n`
+      + `Kazanırsa: +${(hisse - maliyet).toFixed(0)} TST\n\n`
+      + `Kalan nakit: ${(nakit - maliyet).toFixed(0)} TST`,
+    );
+  } catch (e) {
+    await haber(`⚠️ Emir girilemedi.\n\n${kacir(e.message.slice(0, 160))}`);
+  }
+  return true;
+}
+
 // ------------------------------------------------------------------- tur
 
 async function tur() {
@@ -182,10 +383,12 @@ async function tur() {
         const fiyat = (m.metadata?.outcomes ?? [])
           .map((o, i) => `${o} ${(m.spotImpliedProbabilities?.[i] * 100).toFixed(0)}%`).join('  ');
         await haber(
-          `🆕 YENİ PİYASA\n\n${soru}\n\n`
+          `🆕 YENİ PİYASA\n\n${kopyalanabilir(soru)}\n\n`
           + `Fiyatlar: ${fiyat}\n`
           + `Uzlaşma: ${(m.settlesAt ?? '').slice(0, 16).replace('T', ' ')}\n\n`
-          + `Bunu ajan fiyatlayamıyor, elle bakılmalı.`,
+          + `Bunu ajan fiyatlayamıyor, elle bakılmalı.\n`
+          + `Kod: ${kod(m.id)}\n\n`
+          + `Karar verdiysen şöyle yaz:  al ${kod(m.id)} ${(m.metadata?.outcomes ?? ['yes'])[0]} 100`,
         );
       }
     }
@@ -226,7 +429,7 @@ async function tur() {
       nakit -= maliyet;
       durum.islenen.push(m.id);
       await haber(
-        `✅ İŞLEM AÇILDI\n\n${soru}\n\n`
+        `✅ İŞLEM AÇILDI\n\n${kopyalanabilir(soru)}\n\n`
         + `Alınan: ${yon}, ${hisse} hisse\n`
         + `Maliyet: ${maliyet.toFixed(0)} TST (ortalama %${(maliyet / hisse * 100).toFixed(0)})\n`
         + `Kazanırsa: +${(hisse - maliyet).toFixed(0)} TST\n\n`
@@ -237,7 +440,7 @@ async function tur() {
         + `Kalan nakit: ${nakit.toFixed(0)} TST`,
       );
     } catch (e) {
-      await haber(`⚠️ İŞLEM AÇILAMADI\n\n${soru}\n\nSebep: ${e.message.slice(0, 140)}`);
+      await haber(`⚠️ İŞLEM AÇILAMADI\n\n${kopyalanabilir(soru)}\n\nSebep: ${kacir(e.message.slice(0, 140))}`);
     }
   }
 
@@ -258,11 +461,53 @@ async function tur() {
   durumYaz(durum);
 }
 
-// ------------------------------------------------------------------ dongu
+// ------------------------------------------------------------------ donguler
 
-await haber('🔭 Anka nöbete başladı. Beş dakikada bir bakacak, bir şey olunca yazacak.');
-for (;;) {
-  try { await tur(); }
-  catch (e) { console.log(new Date().toISOString(), 'tur hatasi:', e.message.slice(0, 140)); }
-  await new Promise((r) => setTimeout(r, ARALIK_MS));
+/**
+ * Commands are read on their own clock.
+ *
+ * They were folded into the market scan, which meant a message typed from a
+ * phone waited up to five minutes for an answer. Scanning markets is slow work
+ * that costs an RPC fan-out; reading a mailbox is not, so the two run apart and
+ * the one a person is waiting on runs often.
+ */
+async function komutDongusu() {
+  for (;;) {
+    try {
+      const komutlar = await komutlariOku();
+      if (komutlar.length) {
+        const liste = await client.listMarkets({
+          status: 'open', pricesAndImpliedProbabilities: true, limit: 50,
+        });
+        const { balance } = await client.getErc20BalanceWithDecimals();
+        let nakit = toTst(balance);
+        for (const k of komutlar) {
+          const tanindi = await komutIsle(k, liste.markets ?? [], nakit);
+          if (!tanindi) {
+            await haber(
+              `Bunu anlamadım: <code>${kacir(k)}</code>\n\n`
+              + `Komutlar:\n<b>liste</b> — açık piyasalar\n<b>poz</b> — açık pozisyonlar\n`
+              + `<b>durum</b> — nakit ve özet\n<b>al &lt;kod&gt; &lt;sonuç&gt; &lt;tst&gt;</b> — işlem aç`,
+            );
+          }
+          const b = await client.getErc20BalanceWithDecimals();
+          nakit = toTst(b.balance);
+        }
+      }
+    } catch (e) {
+      console.log(new Date().toISOString(), 'komut hatasi:', e.message.slice(0, 140));
+    }
+    await new Promise((r) => setTimeout(r, KOMUT_ARALIK_MS));
+  }
 }
+
+async function piyasaDongusu() {
+  for (;;) {
+    try { await tur(); }
+    catch (e) { console.log(new Date().toISOString(), 'tur hatasi:', e.message.slice(0, 140)); }
+    await new Promise((r) => setTimeout(r, ARALIK_MS));
+  }
+}
+
+await haber('🔭 Anka nöbette. Piyasalara beş dakikada bir bakıyorum, komutlarını on saniyede bir okuyorum.');
+await Promise.all([komutDongusu(), piyasaDongusu()]);
